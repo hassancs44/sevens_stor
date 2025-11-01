@@ -15,9 +15,11 @@ from openpyxl.styles import PatternFill
 # -------------------------------------------------
 # الإعدادات الأساسية (مسار ثابت كما طلبت)
 # -------------------------------------------------
-EXCEL_PATH = r"D:\Project ILM\Tool store\المخزون.xlsx"
-DATA_DIR = os.path.dirname(EXCEL_PATH)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
+
+EXCEL_PATH = os.path.join(DATA_DIR, "المخزون.xlsx")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 
 # حقوق المطور
