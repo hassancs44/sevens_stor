@@ -1,7 +1,7 @@
-streamlit
-pandas
-openpyxl
-xlsxwriter
-numpy
-requests
-Pillow
+streamlit==1.51.0
+pandas==2.3.3
+openpyxl==3.1.5
+xlsxwriter==3.2.0
+numpy==2.3.4
+requests==2.32.3
+Pillow==10.4.0
