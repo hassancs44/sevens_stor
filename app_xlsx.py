@@ -911,15 +911,6 @@ def nav_to(page_name: str):
     st.session_state.menu = page_name
     st.rerun()
 
-
-def top_nav():
-    st.markdown("#### التنقل السريع")
-    cols = st.columns(len(PAGES))
-    for i, p in enumerate(PAGES):
-        if cols[i].button(p, key=f"topnav_{p}"):
-            nav_to(p)
-
-
 # -------------------------------------------------
 # أدوات حالة الملف
 # -------------------------------------------------
@@ -938,7 +929,7 @@ def file_status_badge():
 # -------------------------------------------------
 def page_find_and_scan():
     st.subheader("بحث داخل المخزن (بدون استلام)")
-    top_nav()
+
     file_status_badge()
     stock, minlvl, tx, _ = read_all()
     cfg = load_config()
@@ -1014,7 +1005,7 @@ def _clear_inputs_and_rerun():
 
 def page_stocktake():
     st.subheader("الجرد المبسّط")
-    top_nav()
+
     file_status_badge()
     _init_stocktake_state()
     cfg = load_config()
@@ -1180,7 +1171,7 @@ def _exists_pair(stock: pd.DataFrame, code: str, loc: str) -> bool:
 
 def page_add_new_item():
     st.subheader("إضافة قطعة جديدة")
-    top_nav()
+
     file_status_badge()
     cfg = load_config()
     stock, minlvl, tx, _ = read_all()
@@ -1333,7 +1324,7 @@ def _apply_merge(base: pd.DataFrame, incoming: pd.DataFrame, mode: str,
 
 def page_merge():
     st.subheader("دمج ملف جديد مع الملف الحالي")
-    top_nav()
+
     file_status_badge()
     base_stock, minlvl, tx, _ = read_all()
     st.caption(f"الأكواد الحالية: {base_stock['الكود'].nunique():,} | الصفوف: {len(base_stock):,}")
@@ -1400,7 +1391,7 @@ def page_merge():
 
 def page_data_editor():
     st.subheader("تحرير البيانات مباشرة (Stock)")
-    top_nav()
+
     file_status_badge()
     stock, minlvl, tx, _ = read_all()
     edited_stock = st.data_editor(
@@ -1432,7 +1423,7 @@ def page_data_editor():
 
 def page_operations():
     st.subheader("العمليات (صرف / تحويل)")
-    top_nav()
+
     file_status_badge()
     stock, minlvl, tx, _ = read_all()
     cfg = load_config()
@@ -1555,7 +1546,7 @@ def page_operations():
 
 def page_import_export():
     st.subheader("استيراد / تصدير")
-    top_nav()
+
     file_status_badge()
     stock, minlvl, tx, _ = read_all()
     st.markdown("### تنزيل نسخة عمل (Stock + Transactions)")
@@ -1575,7 +1566,7 @@ def page_import_export():
 
 def page_settings():
     st.subheader("إعدادات")
-    top_nav()
+
     st.caption(f"المسار الحالي لملف البيانات: {EXCEL_PATH}")
     file_status_badge()
     cfg = load_config()
@@ -1650,7 +1641,7 @@ def render_credits():
 
 def page_dashboard():
     st.subheader("لوحة التحكم")
-    top_nav()
+    
     file_status_badge()
     stock, minlvl, tx, _ = read_all()
     cfg = load_config()
