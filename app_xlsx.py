@@ -23,7 +23,7 @@ EXCEL_PATH = os.path.join(DATA_DIR, "المخزون.xlsx")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 
 # حقوق المطور
-DEV_NAME = "حسان الحربي"
+DEV_NAME = "sevens"
 
 # إعدادات افتراضية
 DEFAULT_CONFIG = {
