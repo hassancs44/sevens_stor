@@ -484,45 +484,109 @@ def ensure_original_flag(code: str, cfg: dict, want_original: bool) -> str:
         return c if c.endswith(suf) else (c + suf)
 
 
-def apply_suffix_policy(raw_code: str, cfg: dict, context: str, checkbox_value: Optional[bool]) -> str:
+def apply_suffix_policy(raw_code: str, cfg: dict, context: str, checkbox_value: Optional[bool],
+                        location: Optional[str] = None) -> str:
+    """
+    🚀 AICR v3.0 - Auto Intelligent Code Resolver
+    أقوى خوارزمية لتصنيف الكود (أصلي / تجاري) تلقائيًا بدقة عالية
+    مع كشف التناقضات وتنبيه المستخدمين
+    """
+
     base = _normalize_code_text(_extract_code_from_text(raw_code) or raw_code, cfg, context=context)
-    allowed_ctx = cfg.get("suffix_apply_on_contexts", ["scan", "bulk", "ops", "stocktake", "add"])
-    if context not in allowed_ctx:
-        return base
-    mode = cfg.get("auto_suffix_mode", "by_checkbox")
     suf = _suffix_to_use(cfg)
-    if mode == "off":
+    orig_code = base
+    comm_code = base + suf
+
+    # ✅ قراءة المخزون
+    try:
+        stock, _, _, _ = read_all()
+        df = stock.copy()
+    except Exception:
+        st.error("❌ خطأ في قراءة بيانات المخزون.")
         return base
-    if mode == "always":
-        return ensure_original_flag(base, cfg, True)
 
-    want_original = bool(checkbox_value) if checkbox_value is not None else None
+    # فلترة حسب الموقع لو موجود
+    if location:
+        df_site = df[df["الموقع"] == location]
+    else:
+        df_site = df
 
-    # ✅ ذكاء إضافي: محاولة اكتشاف النوع من المخزون إذا لم يُحدّد الزر
-    if want_original is None or not want_original:
-        try:
-            stock, _, _, _ = read_all()
-            codes = set(stock["الكود"].astype(str).tolist())
-            orig_code = base
-            comm_code = base + suf
+    codes = set(df_site["الكود"].astype(str).tolist())
+    all_codes = set(df["الكود"].astype(str).tolist())
 
-            has_orig = orig_code in codes
-            has_comm = comm_code in codes
+    has_orig_site = orig_code in codes
+    has_comm_site = comm_code in codes
+    has_orig_global = orig_code in all_codes
+    has_comm_global = comm_code in all_codes
 
-            # ⚙️ منطق القرار الذكي
-            if has_orig and not has_comm:
-                want_original = True   # فقط أصلي متاح
-            elif not has_orig and has_comm:
-                want_original = False  # فقط تجاري متاح
-            elif has_orig and has_comm:
-                # كلاهما موجود → نحترم اختيار المستخدم (أو نفترض تقليد)
-                want_original = bool(checkbox_value) if checkbox_value is not None else False
-            else:
-                want_original = bool(checkbox_value) if checkbox_value is not None else True
-        except Exception:
-            want_original = bool(checkbox_value) if checkbox_value is not None else True
+    # 🔍 قاعدة الذكاء
+    want_original = None
+    confidence = 0.0
+    reason = ""
+
+    # 🧩 مرحلة التحليل
+    if checkbox_value is not None:
+        want_original = bool(checkbox_value)
+        confidence = 1.0
+        reason = "المستخدم حدّد يدويًا ✅"
+
+    elif has_orig_site and not has_comm_site:
+        want_original = True
+        confidence = 0.95
+        reason = "الكود الأصلي موجود فقط في هذا الموقع"
+
+    elif not has_orig_site and has_comm_site:
+        want_original = False
+        confidence = 0.95
+        reason = "الكود التجاري فقط موجود في هذا الموقع"
+
+    elif has_orig_site and has_comm_site:
+        want_original = None
+        confidence = 0.0
+        reason = "كلا النسختين موجودتان بنفس الموقع ⚠️"
+
+    elif not has_orig_site and not has_comm_site:
+        # 👁️ فحص عام في كل المواقع
+        if has_orig_global and not has_comm_global:
+            want_original = True
+            confidence = 0.85
+            reason = "الأصلي موجود في مواقع أخرى"
+        elif not has_orig_global and has_comm_global:
+            want_original = False
+            confidence = 0.85
+            reason = "التقليد موجود في مواقع أخرى"
+        else:
+            want_original = True
+            confidence = 0.6
+            reason = "كود جديد - تم افتراض أنه أصلي"
+
+    # 🚨 مرحلة الحماية من التناقضات
+    duplicates = df_site[
+        df_site["الكود"].astype(str).str.fullmatch(orig_code) | df_site["الكود"].astype(str).str.fullmatch(comm_code)]
+    if len(duplicates) > 2:
+        st.error("⚠️ خطأ: تم العثور على أكثر من سجل لنفس الكود في هذا الموقع.")
+        return base
+
+    # 🎯 القرار النهائي
+    if want_original is None:
+        st.warning(f"⚠️ الكود '{base}' موجود كأصلي وتقليد في نفس الموقع. يرجى تحديد النوع يدويًا.")
+        st.dataframe(duplicates[["الكود", "الوصف", "الكمية"]])
+        return base
+
+    # 💬 ملاحظات ذكية
+    color = "#00bcd4" if confidence >= 0.9 else "#ffb300"
+    st.markdown(
+        f"<div style='background:{color}20;border-left:5px solid {color};padding:8px;margin:5px 0;border-radius:8px;'>"
+        f"<b>🤖 AICR:</b> تم تصنيف الكود "
+        f"<b>{'أصلي' if want_original else 'تجاري'}</b> "
+        f"(<i>{reason}</i>) "
+        f"– <b>دقة:</b> {confidence * 100:.0f}%"
+        f"</div>", unsafe_allow_html=True
+    )
 
     return ensure_original_flag(base, cfg, want_original)
+
+
 # -------------------------------------------------
 # تحميل أولي للورقة (بدون رؤوس) + اكتشاف الشبكة
 # -------------------------------------------------
