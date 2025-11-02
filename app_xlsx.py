@@ -495,25 +495,34 @@ def apply_suffix_policy(raw_code: str, cfg: dict, context: str, checkbox_value: 
         return base
     if mode == "always":
         return ensure_original_flag(base, cfg, True)
-    # في وضع "by_checkbox"، نستخدم قيمة الزر أو نكتشف تلقائيًا من الملف
-    if checkbox_value is None:
-        return base
 
-    want_original = bool(checkbox_value)
+    want_original = bool(checkbox_value) if checkbox_value is not None else None
 
-    # ✅ ذكاء إضافي: لو نسي الموظف الزر، النظام يتحقق من وجود الكود الأصلي فعلاً
-    try:
-        if not want_original:
-            # نقرأ البيانات بسرعة دون كاش
+    # ✅ ذكاء إضافي: محاولة اكتشاف النوع من المخزون إذا لم يُحدّد الزر
+    if want_original is None or not want_original:
+        try:
             stock, _, _, _ = read_all()
-            if base in stock["الكود"].astype(str).tolist():
-                want_original = True
-    except Exception:
-        pass
+            codes = set(stock["الكود"].astype(str).tolist())
+            orig_code = base
+            comm_code = base + suf
+
+            has_orig = orig_code in codes
+            has_comm = comm_code in codes
+
+            # ⚙️ منطق القرار الذكي
+            if has_orig and not has_comm:
+                want_original = True   # فقط أصلي متاح
+            elif not has_orig and has_comm:
+                want_original = False  # فقط تجاري متاح
+            elif has_orig and has_comm:
+                # كلاهما موجود → نحترم اختيار المستخدم (أو نفترض تقليد)
+                want_original = bool(checkbox_value) if checkbox_value is not None else False
+            else:
+                want_original = bool(checkbox_value) if checkbox_value is not None else True
+        except Exception:
+            want_original = bool(checkbox_value) if checkbox_value is not None else True
 
     return ensure_original_flag(base, cfg, want_original)
-
-
 # -------------------------------------------------
 # تحميل أولي للورقة (بدون رؤوس) + اكتشاف الشبكة
 # -------------------------------------------------
