@@ -494,12 +494,24 @@ def apply_suffix_policy(raw_code: str, cfg: dict, context: str, checkbox_value: 
     if mode == "off":
         return base
     if mode == "always":
-        # في وضع "always"، نعتبر أن القيمة الافتراضية هي "أصلي"
         return ensure_original_flag(base, cfg, True)
-    # في وضع "by_checkbox"، نستخدم قيمة الزر
+    # في وضع "by_checkbox"، نستخدم قيمة الزر أو نكتشف تلقائيًا من الملف
     if checkbox_value is None:
         return base
-    return ensure_original_flag(base, cfg, bool(checkbox_value))
+
+    want_original = bool(checkbox_value)
+
+    # ✅ ذكاء إضافي: لو نسي الموظف الزر، النظام يتحقق من وجود الكود الأصلي فعلاً
+    try:
+        if not want_original:
+            # نقرأ البيانات بسرعة دون كاش
+            stock, _, _, _ = read_all()
+            if base in stock["الكود"].astype(str).tolist():
+                want_original = True
+    except Exception:
+        pass
+
+    return ensure_original_flag(base, cfg, want_original)
 
 
 # -------------------------------------------------
