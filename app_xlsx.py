@@ -573,16 +573,7 @@ def apply_suffix_policy(raw_code: str, cfg: dict, context: str, checkbox_value: 
         st.dataframe(duplicates[["الكود", "الوصف", "الكمية"]])
         return base
 
-    # 💬 ملاحظات ذكية
-    color = "#00bcd4" if confidence >= 0.9 else "#ffb300"
-    st.markdown(
-        f"<div style='background:{color}20;border-left:5px solid {color};padding:8px;margin:5px 0;border-radius:8px;'>"
-        f"<b>🤖 AICR:</b> تم تصنيف الكود "
-        f"<b>{'أصلي' if want_original else 'تجاري'}</b> "
-        f"(<i>{reason}</i>) "
-        f"– <b>دقة:</b> {confidence * 100:.0f}%"
-        f"</div>", unsafe_allow_html=True
-    )
+   
 
     return ensure_original_flag(base, cfg, want_original)
 
