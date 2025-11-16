@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Optional, List, Tuple, Dict
 import pandas as pd
 import streamlit as st
+from PIL.ImagePalette import raw
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 
@@ -573,7 +574,7 @@ def apply_suffix_policy(raw_code: str, cfg: dict, context: str, checkbox_value: 
         st.dataframe(duplicates[["الكود", "الوصف", "الكمية"]])
         return base
 
-   
+
 
     return ensure_original_flag(base, cfg, want_original)
 
@@ -1118,18 +1119,46 @@ def page_stocktake():
 
     qty = st.number_input("العدد الفعلي", min_value=0, value=0, step=1, key="stk_count_simple")
 
-    # زر الإضافة
-    if st.button("إضافة إلى سلة الجرد"):
-        raw = (st.session_state.stocktake.get("last_code", "") or manual_code or "").strip()
+    # ================================
+    #  🟦 وضع المسح التلقائي Auto Scan
+    # ================================
+    def _auto_scan_handler():
+        raw = st.session_state.get("autoscan_input", "").strip()
+        st.session_state.autoscan_input = ""
+
         if not raw:
-            st.toast("⚠️ أدخل الكود أولًا.", icon="⚠️", duration=4)
             return
 
-        code_with_suffix = apply_suffix_policy(raw, cfg, context="stocktake",
-                                               checkbox_value=st.session_state.stocktake["is_orig"])
+        st.session_state.stocktake["last_code"] = raw
+        st.session_state.run_add_to_basket = True
+
+    st.text_input(
+        "🟦 المسح التلقائي (ماسح ضوئي بدون زر)",
+        key="autoscan_input",
+        placeholder="امسح الباركود وسيضاف تلقائيًا...",
+        on_change=_auto_scan_handler,
+    )
+
+    # زر الإضافة
+    pressed = st.button("إضافة إلى سلة الجرد")
+
+    if st.session_state.get("run_add_to_basket"):
+        pressed = True
+        st.session_state.run_add_to_basket = False
+
+    if pressed:
+
+        raw = st.session_state.stocktake["last_code"]
+
+        # ✔ تطبيق منطق الأصلي/التجاري
+        code_with_suffix = apply_suffix_policy(
+            raw,
+            cfg,
+            context="stocktake",
+            checkbox_value=st.session_state.stocktake["is_orig"]
+        )
         code_normalized = _normalize_code_text(code_with_suffix, cfg, context="stocktake")
 
-        all_codes = set(stock["الكود"].astype(str))
         suf = _suffix_to_use(cfg)
         candidates = {code_normalized}
         if code_normalized.endswith(suf):
@@ -1141,7 +1170,7 @@ def page_stocktake():
         sys_locs = sorted(matched["الموقع"].unique().tolist())
         loc_entered = st.session_state.stocktake["loc"] if st.session_state.stocktake["scope"] == "loc" else None
 
-        # ✅ تحقق الموقع قبل الإضافة
+        # تحقق الموقع
         if st.session_state.stocktake["scope"] == "loc":
             if not loc_entered:
                 st.toast("❌ أدخل الموقع أولًا.", icon="❌", duration=4)
@@ -1150,13 +1179,36 @@ def page_stocktake():
                 st.toast(f"⚠️ الموقع '{loc_entered}' غير مسجل لهذا الكود.", icon="⚠️", duration=4)
                 return
 
-        # إضافة للسلة
-        key = (code_normalized, loc_entered if st.session_state.stocktake["scope"] == "loc" else None)
-        sys_qty = matched[matched["الموقع"] == loc_entered]["المخزون"].sum() if loc_entered else matched["المخزون"].sum()
-        st.session_state.stocktake["items"][key] = {"count": int(qty), "sys_qty": int(sys_qty)}
-        st.toast(f"✅ تمت إضافة {code_normalized} ({qty})", icon="✅", duration=4)
+        # كمية النظام
+        sys_qty = 0
+        if not matched.empty:
+            if loc_entered:
+                sys_qty = int(matched[matched["الموقع"] == loc_entered]["المخزون"].sum())
+            else:
+                sys_qty = int(matched["المخزون"].sum())
 
-        # إعادة تركيز المؤشر على خانة الباركود
+        # كمية الإدخال
+        add_qty_value = int(qty)
+        if add_qty_value <= 0:
+            add_qty_value = 1
+
+        items = st.session_state.stocktake["items"]
+        key = (code_normalized, loc_entered if st.session_state.stocktake["scope"] == "loc" else None)
+
+        if key in items:
+            items[key]["count"] += add_qty_value
+            total_for_key = items[key]["count"]
+        else:
+            items[key] = {"count": add_qty_value, "sys_qty": int(sys_qty)}
+            total_for_key = add_qty_value
+
+        loc_label = "المخزن كامل" if key[1] is None else key[1]
+        st.toast(
+            f"✅ تمت إضافة {add_qty_value} للقطعة {code_normalized} في [{loc_label}] — الإجمالي الآن: {total_for_key}",
+            icon="✅",
+            duration=4
+        )
+
         st.markdown(
             "<script>setTimeout(()=>document.querySelectorAll('input[placeholder=\"امسح الباركود هنا ثم Enter\"]')[0]?.focus(),300);</script>",
             unsafe_allow_html=True,
@@ -1176,16 +1228,15 @@ def page_stocktake():
     basket_df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["الكود", "النوع", "الموقع", "العدد الفعلي", "عدد النظام"])
     st.dataframe(basket_df.sort_values(["الكود", "الموقع"]), use_container_width=True, height=280)
 
-    # 🔢 مجموع الجرد
     total_count = basket_df["العدد الفعلي"].sum() if not basket_df.empty else 0
     st.markdown(f"**إجمالي القطع في الجرد:** {total_count:,}")
 
-    # أزرار التحكم
     col_clear, col_apply = st.columns(2)
     with col_clear:
         if st.button("تفريغ السلة"):
             st.session_state.stocktake["items"].clear()
             st.toast("🗑️ تم تفريغ السلة.", icon="🗑️", duration=4)
+
     with col_apply:
         if st.button("تطبيق التسوية"):
             if not st.session_state.stocktake["items"]:
