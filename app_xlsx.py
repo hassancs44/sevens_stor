@@ -561,6 +561,24 @@ def apply_suffix_policy(raw_code: str, cfg: dict, context: str, checkbox_value: 
             confidence = 0.6
             reason = "كود جديد - تم افتراض أنه أصلي"
 
+            # 🧠 منطق المواقع — إذا الأصلي والتجاري في مواقع مختلفة
+            orig_locs = sorted(df[df["الكود"] == orig_code]["الموقع"].astype(str).unique().tolist())
+            comm_locs = sorted(df[df["الكود"] == comm_code]["الموقع"].astype(str).unique().tolist())
+
+            if location:
+                if orig_locs and comm_locs:
+                    # الموقع يحتوي الأصلي فقط
+                    if (location in orig_locs) and (location not in comm_locs):
+                        want_original = True
+                        confidence = 1.0
+                        reason = "الموقع يحتوي فقط النسخة الأصلية → إجبار صحيح تلقائي"
+
+                    # الموقع يحتوي التجاري فقط
+                    elif (location in comm_locs) and (location not in orig_locs):
+                        want_original = False
+                        confidence = 1.0
+                        reason = "الموقع يحتوي فقط النسخة التجارية → إجبار صحيح تلقائي"
+
     # 🚨 مرحلة الحماية من التناقضات
     duplicates = df_site[
         df_site["الكود"].astype(str).str.fullmatch(orig_code) | df_site["الكود"].astype(str).str.fullmatch(comm_code)]
@@ -1166,7 +1184,23 @@ def page_stocktake():
         else:
             candidates.add(code_normalized + suf)
 
-        matched = stock[stock["الكود"].isin(candidates)]
+        # --- 🔍 منطق تمييز الأصلي / التجاري بدقة 100% ---
+        code_norm = _normalize_code_text(raw, cfg, context="stocktake")
+        suf = _suffix_to_use(cfg)
+
+        if st.session_state.stocktake["is_orig"]:
+            # المستخدم اختار أصلي → الكود يجب أن يكون بدون S
+            final_code = code_norm if not code_norm.endswith(suf) else code_norm[:-len(suf)]
+        else:
+            # المستخدم اختار تجاري → يضيف S تلقائيًا إذا ما كانت موجودة
+            final_code = code_norm if code_norm.endswith(suf) else code_norm + suf
+
+        # البحث الدقيق داخل ملف الإكسل — بدون دمج الأصلي والتجاري
+        matched = stock[stock["الكود"] == final_code]
+
+        # استخراج المواقع المرتبطة بنفس الكود فقط
+        sys_locs = sorted(matched["الموقع"].astype(str).unique().tolist())
+
         sys_locs = sorted(matched["الموقع"].unique().tolist())
         loc_entered = st.session_state.stocktake["loc"] if st.session_state.stocktake["scope"] == "loc" else None
 
