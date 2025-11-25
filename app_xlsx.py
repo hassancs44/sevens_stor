@@ -1237,10 +1237,14 @@ def page_stocktake():
             total_for_key = add_qty_value
 
         loc_label = "المخزن كامل" if key[1] is None else key[1]
+        # حساب رقم الصف
+        row_num = list(st.session_state.stocktake["items"].keys()).index(key) + 1
+
+        # تنبيه كامل لمدة 10 ثواني ويشمل رقم الصف
         st.toast(
-            f"✅ تمت إضافة {add_qty_value} للقطعة {code_normalized} في [{loc_label}] — الإجمالي الآن: {total_for_key}",
-            icon="✅",
-            duration=4
+            f"🔄 تم تعديل الصف رقم {row_num} — الكود: {code_normalized}, الموقع: {loc_label}, العدد الجديد: {total_for_key}",
+            icon="🔔",
+            duration=10
         )
 
         st.markdown(
@@ -1260,7 +1264,13 @@ def page_stocktake():
             "عدد النظام": d["sys_qty"],
         })
     basket_df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["الكود", "النوع", "الموقع", "العدد الفعلي", "عدد النظام"])
-    st.dataframe(basket_df.sort_values(["الكود", "الموقع"]), use_container_width=True, height=280)
+    table_height = min(800, 80 + len(basket_df) * 35)
+
+    st.dataframe(
+        basket_df.sort_values(["الكود", "الموقع"]),
+        use_container_width=True,
+        height=table_height
+    )
 
     total_count = basket_df["العدد الفعلي"].sum() if not basket_df.empty else 0
     st.markdown(f"**إجمالي القطع في الجرد:** {total_count:,}")
