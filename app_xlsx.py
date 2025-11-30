@@ -1269,7 +1269,7 @@ def page_stocktake():
             final_code = code_norm if code_norm.endswith(suf) else code_norm + suf
 
         # البحث الدقيق داخل ملف الإكسل — بدون دمج الأصلي والتجاري
-        matched = stock[stock["الكود"] == code_normalized]
+        matched = stock[stock["الكود"] == code_with_suffix]
 
         # استخراج المواقع المرتبطة بنفس الكود فقط
         sys_locs = sorted(matched["الموقع"].astype(str).unique().tolist())
