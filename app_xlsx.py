@@ -1122,6 +1122,24 @@ def page_stocktake():
             loc_input = st.text_input("الموقع (كتابي)", value=st.session_state.stocktake.get("loc", ""),
                                       placeholder="مثال: رف-أ1", key="stk_loc_input")
             st.session_state.stocktake["loc"] = loc_input.strip()
+
+            # 🔄 زر إعادة جرد هذا الموقع
+            cur_loc = st.session_state.stocktake["loc"].strip()
+            if cur_loc:
+                if st.button(f"🔄 إعادة جرد الموقع: {cur_loc}"):
+                    # احذف بيانات الموقع من المواقع المكتملة
+                    if cur_loc in st.session_state.stocktake_sites:
+                        del st.session_state.stocktake_sites[cur_loc]
+
+                    # احذف القطع الخاصة بهذا الموقع من السلة
+                    st.session_state.stocktake["items"] = {
+                        k: v for k, v in st.session_state.stocktake["items"].items()
+                        if k[1] != cur_loc
+                    }
+
+                    st.toast(f"♻️ تم مسح بيانات الجرد للموقع '{cur_loc}'. يمكنك البدء من جديد.", icon="♻️", duration=6)
+                    st.rerun()
+
             # 🟦 منطق الانتقال بين المواقع
             prev_loc = st.session_state.stocktake.get("prev_loc", "")
             current_loc = st.session_state.stocktake["loc"].strip()
@@ -1341,6 +1359,61 @@ def page_stocktake():
         use_container_width=True,
         height=300
     )
+
+    # ---------------------------------------------------------
+    # زر تصدير ملف الجرد (بدون تطبيق التسوية)
+    # ---------------------------------------------------------
+    if st.button("📤 تصدير ملف الجرد"):
+        final_export = {}
+
+        # 1) المواقع التي تم حفظها مسبقًا
+        for site, df_site in st.session_state.stocktake_sites.items():
+            final_export[site] = df_site.copy()
+
+        # 2) الموقع الحالي (إن كان فيه جرد)
+        if st.session_state.stocktake["scope"] == "loc":
+            cur = st.session_state.stocktake["loc"].strip()
+            df_current = pd.DataFrame([
+                {
+                    "الكود": code,
+                    "الموقع": cur,
+                    "العدد الفعلي": d["count"],
+                    "عدد النظام": d["sys_qty"],
+                }
+                for (code, loc), d in st.session_state.stocktake["items"].items()
+                if loc == cur
+            ])
+            if not df_current.empty:
+                final_export[cur] = df_current.copy()
+
+        # ---------------------------------------------------------
+        # 3) القطع الغير مجرودة (لم يتم جردها في أي موقع)
+        # ---------------------------------------------------------
+        stock_all, _, _, _ = read_all()
+        counted_codes = set([code for (code, _) in st.session_state.stocktake["items"].keys()])
+
+        df_unscanned = stock_all[~stock_all["الكود"].isin(counted_codes)].copy()
+
+        # ---------------------------------------------------------
+        # 4) إنشاء ملف Excel النهائي
+        # ---------------------------------------------------------
+        out = io.BytesIO()
+        with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
+
+            # الورقة الأولى: القطع الغير مجرودة
+            df_unscanned.to_excel(writer, index=False, sheet_name="غير_مجرود")
+
+            # بقية المواقع
+            for site, df_site in final_export.items():
+                sheet_name = site[:31] if site else "بدون_موقع"
+                df_site.to_excel(writer, index=False, sheet_name=sheet_name)
+
+        st.download_button(
+            "📥 تحميل ملف الجرد النهائي",
+            data=out.getvalue(),
+            file_name=f"تقرير_الجرد_{_ts()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
     # عرض السلة
     st.markdown("### سلة الجرد")
