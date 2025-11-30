@@ -1073,6 +1073,10 @@ def page_find_and_scan():
 # -------------------------------------------------
 def _init_stocktake_state():
     if "stocktake" not in st.session_state:
+        # 🟦 تخزين نتائج كل موقع
+        if "stocktake_sites" not in st.session_state:
+            st.session_state.stocktake_sites = {}  # {الموقع: DataFrame}
+
         st.session_state.stocktake = {
             "scope": "all",
             "loc": "",
@@ -1118,6 +1122,57 @@ def page_stocktake():
             loc_input = st.text_input("الموقع (كتابي)", value=st.session_state.stocktake.get("loc", ""),
                                       placeholder="مثال: رف-أ1", key="stk_loc_input")
             st.session_state.stocktake["loc"] = loc_input.strip()
+            # 🟦 منطق الانتقال بين المواقع
+            prev_loc = st.session_state.stocktake.get("prev_loc", "")
+            current_loc = st.session_state.stocktake["loc"].strip()
+
+            # إذا كان هناك موقع سابق وتم تغيير الموقع
+            if prev_loc and current_loc and current_loc != prev_loc:
+                # هل يوجد قطع لم تُجرّد؟
+                remaining = [
+                    k for k in st.session_state.stocktake["items"].keys()
+                    if k[1] == prev_loc
+                ]
+
+                if remaining:
+                    st.toast(
+                        f"⚠️ يوجد قطع لم تُجرّد في الموقع '{prev_loc}'.",
+                        icon="⚠️",
+                        duration=15
+                    )
+                    # إعادة الموقع القديم
+                    st.session_state.stocktake["loc"] = prev_loc
+                    st.rerun()
+                else:
+                    # الموقع مكتمل → نحفظه
+                    df_site = pd.DataFrame([
+                        {
+                            "الكود": code,
+                            "الموقع": prev_loc,
+                            "العدد الفعلي": d["count"],
+                            "عدد النظام": d["sys_qty"],
+                        }
+                        for (code, loc), d in st.session_state.stocktake["items"].items()
+                        if loc == prev_loc
+                    ])
+                    if not df_site.empty:
+                        st.session_state.stocktake_sites[prev_loc] = df_site.copy()
+
+                    # إزالة عناصر الموقع السابق من السلة
+                    st.session_state.stocktake["items"] = {
+                        k: v for k, v in st.session_state.stocktake["items"].items()
+                        if k[1] != prev_loc
+                    }
+
+                    st.toast(
+                        f"✅ تم حفظ جرد الموقع '{prev_loc}'. يمكنك البدء في '{current_loc}'.",
+                        icon="✅",
+                        duration=8
+                    )
+
+            # تحديث الموقع السابق دائماً
+            st.session_state.stocktake["prev_loc"] = current_loc
+
         else:
             st.text_input("الموقع (معطّل في وضع المخزن كامل)", value="", disabled=True)
 
@@ -1252,6 +1307,41 @@ def page_stocktake():
             unsafe_allow_html=True,
         )
 
+    # ---------------------------------------------------------
+    #  جدول القطع حسب الموقع قبل سلة الجرد
+    # ---------------------------------------------------------
+    st.markdown("### القطع الموجودة في الموقع المحدد")
+
+    if st.session_state.stocktake["scope"] == "loc":
+        loc_entered = st.session_state.stocktake["loc"].strip()
+        if loc_entered:
+            df_loc = stock[stock["الموقع"] == loc_entered].copy()
+        else:
+            df_loc = stock.copy()
+    else:
+        df_loc = stock.copy()
+
+    # إزالة أي قطعة موجودة مسبقاً في سلة الجرد (انتقال إلى السلة)
+    items_keys = st.session_state.stocktake["items"].keys()
+    codes_in_basket = [k[0] for k in items_keys]
+    locs_in_basket = [k[1] for k in items_keys]
+
+    # إذا سلة الجرد بنطاق موقع معين → استبعاد القطع المنقولة فقط
+    if st.session_state.stocktake["scope"] == "loc":
+        df_loc = df_loc[~(
+                (df_loc["الكود"].astype(str).isin(codes_in_basket)) &
+                (df_loc["الموقع"].astype(str).isin(locs_in_basket))
+        )]
+    else:
+        # المخزن كامل → لا نعرض أي قطعة موجودة في السلة (أي موقع)
+        df_loc = df_loc[~df_loc["الكود"].astype(str).isin(codes_in_basket)]
+
+    st.dataframe(
+        df_loc.sort_values(["الكود", "الموقع"]),
+        use_container_width=True,
+        height=300
+    )
+
     # عرض السلة
     st.markdown("### سلة الجرد")
     rows = []
@@ -1286,6 +1376,43 @@ def page_stocktake():
             if not st.session_state.stocktake["items"]:
                 st.toast("⚠️ السلة فارغة.", icon="⚠️", duration=4)
                 return
+            # 🟦 تجميع جميع المواقع في ملف Excel نهائي
+            final_export = {}
+
+            # المواقع التي تم حفظها مسبقاً
+            for site, df_site in st.session_state.stocktake_sites.items():
+                final_export[site] = df_site.copy()
+
+            # إضافة الموقع الحالي إن كان مكتملاً
+            if st.session_state.stocktake["scope"] == "loc":
+                cur = st.session_state.stocktake["loc"].strip()
+                df_current = pd.DataFrame([
+                    {
+                        "الكود": code,
+                        "الموقع": cur,
+                        "العدد الفعلي": d["count"],
+                        "عدد النظام": d["sys_qty"],
+                    }
+                    for (code, loc), d in st.session_state.stocktake["items"].items()
+                    if loc == cur
+                ])
+                if not df_current.empty:
+                    final_export[cur] = df_current.copy()
+
+            # زر تحميل الملف النهائي
+            out = io.BytesIO()
+            with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
+                for site, df_site in final_export.items():
+                    writer_sheet = site[:31]  # اسم الورقة بحد أقصى 31 حرف
+                    df_site.to_excel(writer, index=False, sheet_name=writer_sheet)
+
+            st.download_button(
+                "📥 تحميل ملف الجرد (ورقة لكل موقع)",
+                data=out.getvalue(),
+                file_name=f"جرد_المواقع_{_ts()}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
             try:
                 stock_cur, minlvl_cur, tx_cur, _ = read_all()
                 DEFAULT_LOC = "MAIN"
