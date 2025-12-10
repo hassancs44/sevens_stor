@@ -1090,7 +1090,7 @@ def _init_stocktake_state():
 
 def _scan_callback(scan_key: str):
     raw = st.session_state.get(scan_key, "")
-    st.session_state.stocktake["last_code"] = raw
+    st.session_state.stocktake["last_code"] = _normalize_code_text(raw, load_config(), context="stocktake")
     st.session_state.stocktake["scan_rev"] += 1
     st.rerun()
 
@@ -1241,89 +1241,95 @@ def page_stocktake():
 
         raw = st.session_state.stocktake["last_code"]
 
-        # ✔ تطبيق منطق الأصلي/التجاري
-        code_with_suffix = apply_suffix_policy(
-            raw,
-            cfg,
-            context="stocktake",
-            checkbox_value=st.session_state.stocktake["is_orig"]
-        )
-        code_normalized = _normalize_code_text(code_with_suffix, cfg, context="stocktake")
+        # لو ما فيه كود من ماسح تلقائي، خذ من المدخل اليدوي
+        if not raw:
+            raw = manual_code.strip()
 
-        suf = _suffix_to_use(cfg)
-        candidates = {code_normalized}
-        if code_normalized.endswith(suf):
-            candidates.add(code_normalized[:-len(suf)])
+        if not raw:
+            st.toast("⚠️ الرجاء إدخال أو مسح الكود أولاً.", icon="⚠️", duration=4)
         else:
-            candidates.add(code_normalized + suf)
+            # ✔ تطبيع الكود حسب الإعدادات
+            code_norm = _normalize_code_text(raw, cfg, context="stocktake")
+            suf = _suffix_to_use(cfg)
 
-        # --- 🔍 منطق تمييز الأصلي / التجاري بدقة 100% ---
-        code_norm = _normalize_code_text(raw, cfg, context="stocktake")
-        suf = _suffix_to_use(cfg)
-
-        if st.session_state.stocktake["is_orig"]:
-            # المستخدم اختار أصلي → الكود يجب أن يكون بدون S
-            final_code = code_norm if not code_norm.endswith(suf) else code_norm[:-len(suf)]
-        else:
-            # المستخدم اختار تجاري → يضيف S تلقائيًا إذا ما كانت موجودة
-            final_code = code_norm if code_norm.endswith(suf) else code_norm + suf
-
-        # البحث الدقيق داخل ملف الإكسل — بدون دمج الأصلي والتجاري
-        matched = stock[stock["الكود"] == code_with_suffix]
-
-        # استخراج المواقع المرتبطة بنفس الكود فقط
-        sys_locs = sorted(matched["الموقع"].astype(str).unique().tolist())
-
-        sys_locs = sorted(matched["الموقع"].unique().tolist())
-        loc_entered = st.session_state.stocktake["loc"] if st.session_state.stocktake["scope"] == "loc" else None
-
-        # تحقق الموقع
-        if st.session_state.stocktake["scope"] == "loc":
-            if not loc_entered:
-                st.toast("❌ أدخل الموقع أولًا.", icon="❌", duration=4)
-                return
-            if sys_locs and loc_entered not in sys_locs:
-                st.toast(f"⚠️ الموقع '{loc_entered}' غير مسجل لهذا الكود.", icon="⚠️", duration=4)
-                return
-
-        # كمية النظام
-        sys_qty = 0
-        if not matched.empty:
-            if loc_entered:
-                sys_qty = int(matched[matched["الموقع"] == loc_entered]["المخزون"].sum())
+            # --- 🔍 منطق تمييز الأصلي / التجاري ---
+            if st.session_state.stocktake["is_orig"]:
+                # المستخدم اختار أصلي → الكود بدون اللاحقة
+                final_code = code_norm if not code_norm.endswith(suf) else code_norm[:-len(suf)]
             else:
-                sys_qty = int(matched["المخزون"].sum())
+                # المستخدم اختار تجاري → الكود مع اللاحقة
+                final_code = code_norm if code_norm.endswith(suf) else code_norm + suf
 
-        # كمية الإدخال
-        add_qty_value = int(qty)
-        if add_qty_value <= 0:
-            add_qty_value = 1
+            # البحث الدقيق داخل ملف الإكسل على الكود النهائي
+            matched = stock[stock["الكود"] == final_code]
 
-        items = st.session_state.stocktake["items"]
-        key = (code_normalized, loc_entered if st.session_state.stocktake["scope"] == "loc" else None)
+            # المواقع المسجّلة لهذا الكود
+            sys_locs = sorted(matched["الموقع"].astype(str).unique().tolist()) if not matched.empty else []
 
-        if key in items:
-            items[key]["count"] += add_qty_value
-            total_for_key = items[key]["count"]
-        else:
-            items[key] = {"count": add_qty_value, "sys_qty": int(sys_qty)}
-            total_for_key = add_qty_value
+            # الموقع الحالي (إن كان الجرد حسب موقع)
+            loc_entered = st.session_state.stocktake["loc"].strip() if st.session_state.stocktake[
+                                                                           "scope"] == "loc" else None
 
-        loc_label = "المخزن كامل" if key[1] is None else key[1]
-        # حساب رقم الصف
-        row_num = list(st.session_state.stocktake["items"].keys()).index(key) + 1
+            # ✅ تحقق من إدخال الموقع في وضع "حسب موقع محدد"
+            if st.session_state.stocktake["scope"] == "loc":
+                if not loc_entered:
+                    st.toast("❌ أدخل الموقع أولًا.", icon="❌", duration=4)
+                    return
 
-        # تنبيه كامل لمدة 10 ثواني ويشمل رقم الصف
-        st.toast(
-            f"🔄 تم تعديل الصف رقم {row_num} — الكود: {code_normalized}, الموقع: {loc_label}, العدد الجديد: {total_for_key}",
-            icon="🔔",
-            duration=10
-        )
+                # لو الكود موجود في النظام لكن الموقع مختلف
+                if sys_locs and loc_entered not in sys_locs:
+                    st.toast(
+                        f"⚠️ الموقع '{loc_entered}' غير مسجل لهذا الكود في الملف (المواقع المسجلة: {', '.join(sys_locs)}).",
+                        icon="⚠️",
+                        duration=8,
+                    )
+                    # نسمح بالاستمرار أحيانًا، لكن نبهناه
+                # نمرر
 
-        st.markdown(
-            "<script>setTimeout(()=>document.querySelectorAll('input[placeholder=\"امسح الباركود هنا ثم Enter\"]')[0]?.focus(),300);</script>",
-            unsafe_allow_html=True,
-        )
+            # ✅ حساب كمية النظام
+            sys_qty = 0
+            if not matched.empty:
+                if loc_entered:
+                    sys_qty = int(matched[matched["الموقع"].astype(str).str.strip() == loc_entered]["المخزون"].sum())
+                else:
+                    sys_qty = int(matched["المخزون"].sum())
+
+            # ✅ كمية الإدخال
+            add_qty_value = int(qty)
+            if add_qty_value <= 0:
+                add_qty_value = 1
+
+            items = st.session_state.stocktake["items"]
+            key = (final_code, loc_entered if st.session_state.stocktake["scope"] == "loc" else None)
+
+            if key in items:
+                items[key]["count"] += add_qty_value
+                total_for_key = items[key]["count"]
+            else:
+                items[key] = {"count": add_qty_value, "sys_qty": int(sys_qty)}
+                total_for_key = add_qty_value
+
+            loc_label = "المخزن كامل" if key[1] is None else key[1]
+
+            # رقم الصف = عدد العناصر في السلة الآن
+            row_num = len(st.session_state.stocktake["items"])
+
+            # تنبيه كامل لمدة 10 ثواني ويشمل رقم الصف
+            st.toast(
+                f"🔄 تم تعديل الصف رقم {row_num} — الكود: {final_code}, الموقع: {loc_label}, العدد الجديد في الجرد: {total_for_key}",
+                icon="🔔",
+                duration=10
+            )
+
+            # إعادة تركيز المؤشر على خانة الماسح
+            st.markdown(
+                "<script>setTimeout(()=>document.querySelectorAll('input[placeholder=\"امسح الباركود وسيضاف تلقائيًا...\"]')[0]?.focus(),300);</script>",
+                unsafe_allow_html=True,
+            )
+
+            # تصفير المدخلات بعد الإضافة
+            st.session_state.stocktake["last_code"] = ""
+            st.session_state.autoscan_input = ""
 
     # ---------------------------------------------------------
     #  جدول القطع حسب الموقع قبل سلة الجرد
@@ -1333,7 +1339,7 @@ def page_stocktake():
     if st.session_state.stocktake["scope"] == "loc":
         loc_entered = st.session_state.stocktake["loc"].strip()
         if loc_entered:
-            df_loc = stock[stock["الموقع"] == loc_entered].copy()
+            df_loc = stock[stock["الموقع"].astype(str).str.strip() == loc_entered].copy()
         else:
             df_loc = stock.copy()
     else:
@@ -1341,15 +1347,13 @@ def page_stocktake():
 
     # إزالة أي قطعة موجودة مسبقاً في سلة الجرد (انتقال إلى السلة)
     items_keys = st.session_state.stocktake["items"].keys()
-    codes_in_basket = [k[0] for k in items_keys]
+    codes_in_basket = set(k[0] for k in items_keys)
     locs_in_basket = [k[1] for k in items_keys]
 
     # إذا سلة الجرد بنطاق موقع معين → استبعاد القطع المنقولة فقط
     if st.session_state.stocktake["scope"] == "loc":
-        df_loc = df_loc[~(
-                (df_loc["الكود"].astype(str).isin(codes_in_basket)) &
-                (df_loc["الموقع"].astype(str).isin(locs_in_basket))
-        )]
+        df_loc = df_loc[~df_loc["الكود"].astype(str).isin(codes_in_basket)]
+
     else:
         # المخزن كامل → لا نعرض أي قطعة موجودة في السلة (أي موقع)
         df_loc = df_loc[~df_loc["الكود"].astype(str).isin(codes_in_basket)]
@@ -1375,7 +1379,7 @@ def page_stocktake():
             cur = st.session_state.stocktake["loc"].strip()
             df_current = pd.DataFrame([
                 {
-                    "الكود": code,
+                    "الكود": final_code,
                     "الموقع": cur,
                     "العدد الفعلي": d["count"],
                     "عدد النظام": d["sys_qty"],
@@ -1392,7 +1396,9 @@ def page_stocktake():
         stock_all, _, _, _ = read_all()
         counted_codes = set([code for (code, _) in st.session_state.stocktake["items"].keys()])
 
-        df_unscanned = stock_all[~stock_all["الكود"].isin(counted_codes)].copy()
+        df_unscanned = stock_all[~stock_all["الكود"].astype(str).isin(counted_codes)].copy()
+
+        df_unscanned["الموقع"] = df_unscanned["الموقع"].astype(str)
 
         # ---------------------------------------------------------
         # 4) إنشاء ملف Excel النهائي
@@ -1673,61 +1679,175 @@ def _apply_merge(base: pd.DataFrame, incoming: pd.DataFrame, mode: str,
 def page_merge():
     st.subheader("دمج ملف جديد مع الملف الحالي")
 
+    # اختيار نوع العملية
+    merge_mode = st.radio(
+        "اختر نوع العملية",
+        [
+            "دمج الملف (Merge) — تحديث + إضافة فقط",
+            "استبدال كامل للمخزون (Replace ALL) — حذف القديم وكتابة الملف الجديد",
+            "نسخ الملف الجديد (Copy) — بدون دمج"
+        ],
+        index=0
+    )
+    st.markdown("---")
+
+    # حالة الملف الحالي
     file_status_badge()
     base_stock, minlvl, tx, _ = read_all()
     st.caption(f"الأكواد الحالية: {base_stock['الكود'].nunique():,} | الصفوف: {len(base_stock):,}")
+
+    # رفع الملف الجديد
     up = st.file_uploader("اختر ملف Excel اليومي للقطع الجديدة", type=["xlsx", "xls"])
     if not up:
         st.info("ارفع ملفًا للبدء.")
         return
+
+    # قراءة أوراق الملف
     try:
         sheets = _uploaded_sheets(up)
     except Exception as e:
         st.error(f"تعذّر قراءة الملف: {e}")
         return
+
     sheet = st.selectbox("اختر الورقة داخل الملف:", options=sheets)
+
+    # قراءة بيانات الورقة المحددة
     try:
         incoming = _read_uploaded_stock(up, sheet)
     except Exception as e:
         st.error(f"فشل التعرف على الأعمدة داخل الورقة المحددة: {e}")
         return
+
+    # تطبيع الأكواد
     cfg = load_config()
     if not incoming.empty:
-        incoming["الكود"] = incoming["الكود"].apply(lambda s: _normalize_code_text(s, cfg, context="merge"))
+        incoming["الكود"] = incoming["الكود"].apply(
+            lambda s: _normalize_code_text(s, cfg, context="merge")
+        )
+
     st.success(f"تم التعرف على {len(incoming)} صفًا من الملف الجديد. معاينة:")
     st.dataframe(incoming.head(30), use_container_width=True, height=240)
+
+    # =====================================================
+    #  🟥 نمط "استبدال كامل للمخزون (Replace ALL)"
+    # =====================================================
+    if merge_mode == "استبدال كامل للمخزون (Replace ALL) — حذف القديم وكتابة الملف الجديد":
+        st.warning("""
+        ⚠️ سيتم حذف جميع البيانات الموجودة في ملف المخزون نهائياً
+        ✔ سيتم استبدال المخزون بالكامل بالملف الجديد
+        ✔ عمليات Transactions ستبقى كما هي
+        ✔ لن يتم حساب فروقات أو دمج
+        """)
+
+        if st.button("✔ تأكيد الاستبدال الكامل"):
+            try:
+                # تجهيز الملف الجديد
+                incoming2 = incoming.copy()
+                incoming2["المخزون"] = incoming2["المخزون"].astype(int)
+
+                # قراءة الملف الحالي (لأجل حفظ المعاملات فقط)
+                stock_cur, minlvl_cur, tx_cur, _ = read_all()
+
+                # استبدال كامل المخزون
+                write_all_with_retry(incoming2, minlvl_cur, tx_cur)
+
+                st.cache_data.clear()
+                st.success("تم استبدال ملف المخزون بالكامل.")
+
+            except Exception as e:
+                st.error(f"فشل الاستبدال: {e}")
+
+        st.stop()
+
+    # =====================================================
+    #  🟦 نمط "نسخ الملف الجديد (Copy) — بدون دمج"
+    # =====================================================
+    if merge_mode == "نسخ الملف الجديد (Copy) — بدون دمج":
+        st.info("سيتم استبدال المخزون الحالي تماماً بالمحتوى الجديد، بدون دمج وبدون مقارنة.")
+
+        if st.button("✔ تنفيذ النسخ"):
+            try:
+                incoming2 = incoming.copy()
+                incoming2["المخزون"] = incoming2["المخزون"].astype(int)
+
+                stock_cur, minlvl_cur, tx_cur, _ = read_all()
+
+                write_all_with_retry(incoming2, minlvl_cur, tx_cur)
+                st.cache_data.clear()
+                st.success("✔ تم استبدال المخزون بالكامل بنسخة الملف الجديد.")
+
+            except Exception as e:
+                st.error(f"فشل النسخ: {e}")
+
+        st.stop()
+
+    # =====================================================
+    #  🟩 نمط "دمج الملف (Merge) — تحديث + إضافة فقط"
+    # =====================================================
     st.markdown("### إعدادات الدمج")
+
     c1, c2, c3 = st.columns(3)
     with c1:
-        mode = st.radio("إستراتيجية الكمية", ["استبدال الكمية (Set)", "إضافة على الكمية (Add)"], horizontal=False)
+        mode = st.radio(
+            "إستراتيجية الكمية",
+            ["استبدال الكمية (Set)", "إضافة على الكمية (Add)"],
+            horizontal=False
+        )
         mode_key = "set" if mode.startswith("استبدال") else "add"
+
     with c2:
-        desc_policy = st.selectbox("سياسة الوصف", ["لا تغيّر الوصف الحالي", "حدّث الوصف إذا كان الحالي فارغًا",
-                                                   "استبدل الوصف دائمًا بالقادم"])
-        desc_key = {"لا تغيّر الوصف الحالي": "keep", "حدّث الوصف إذا كان الحالي فارغًا": "fill_blank",
-                    "استبدل الوصف دائمًا بالقادم": "replace"}[desc_policy]
+        desc_policy = st.selectbox(
+            "سياسة الوصف",
+            ["لا تغيّر الوصف الحالي", "حدّث الوصف إذا كان الحالي فارغًا", "استبدل الوصف دائمًا بالقادم"]
+        )
+        desc_key = {
+            "لا تغيّر الوصف الحالي": "keep",
+            "حدّث الوصف إذا كان الحالي فارغًا": "fill_blank",
+            "استبدل الوصف دائمًا بالقادم": "replace"
+        }[desc_policy]
+
     with c3:
         only_new = st.checkbox("استيراد الأكواد/المواقع الجديدة فقط", value=False)
+
+    # معاينة الفروقات
     st.markdown("### المعاينة قبل الحفظ (Diff)")
     diff_df = _make_diff(base_stock, incoming, mode_key, only_new)
     st.dataframe(diff_df, use_container_width=True, height=320)
+
     add_count = (diff_df["الإجراء"] == "إضافة صف جديد").sum()
     upd_count = (diff_df["الإجراء"] == "تحديث كمية").sum()
     nochg_count = (diff_df["الإجراء"] == "بدون تغيير").sum()
     st.caption(f"إحصائيات: جديد: {add_count} | تحديث: {upd_count} | بدون تغيير: {nochg_count}")
+
+    # ملف تقرير المقارنة
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="xlsxwriter") as w:
         diff_df.to_excel(w, index=False, sheet_name="Diff")
         incoming.to_excel(w, index=False, sheet_name="Incoming")
         base_stock.to_excel(w, index=False, sheet_name="Current")
-    st.download_button("تنزيل تقرير المقارنة (Excel)", data=out.getvalue(),
-                       file_name="تقرير_دمج_المخزون.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    st.download_button(
+        "تنزيل تقرير المقارنة (Excel)",
+        data=out.getvalue(),
+        file_name="تقرير_دمج_المخزون.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+    # تنفيذ الدمج
     if st.button("تنفيذ الدمج والحفظ داخل الملف الحالي"):
         try:
             merged, updated, added = _apply_merge(base_stock, incoming, mode_key, desc_key, only_new)
-            tx = append_txn(tx, "ADJUST", "BULK_MERGE", "دمج ملف يومي", int(len(incoming)), None, None, user="MERGE",
-                            note=f"mode={mode_key}, desc={desc_key}, only_new={only_new}")
+            tx = append_txn(
+                tx,
+                "ADJUST",
+                "BULK_MERGE",
+                "دمج ملف يومي",
+                int(len(incoming)),
+                None,
+                None,
+                user="MERGE",
+                note=f"mode={mode_key}, desc={desc_key}, only_new={only_new}"
+            )
             write_all_with_retry(merged, minlvl, tx)
             st.cache_data.clear()
             st.success(f"تم الدمج بنجاح. تمت إضافة {added} وتحديث {updated} صفًا.")
@@ -1735,6 +1855,7 @@ def page_merge():
                 nav_to("لوحة التحكم")
         except Exception as e:
             st.error(f"فشل الدمج: {e}")
+
 
 
 def page_data_editor():
