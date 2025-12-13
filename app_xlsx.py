@@ -589,7 +589,7 @@ def apply_suffix_policy(raw_code: str, cfg: dict, context: str, checkbox_value: 
     # 🎯 القرار النهائي
     if want_original is None:
         st.warning(f"⚠️ الكود '{base}' موجود كأصلي وتقليد في نفس الموقع. يرجى تحديد النوع يدويًا.")
-        st.dataframe(duplicates[["الكود", "الوصف", "الكمية"]])
+        st.dataframe(duplicates[["الكود", "الوصف", "المخزون"]])
         return base
 
 
@@ -1073,19 +1073,23 @@ def page_find_and_scan():
 # -------------------------------------------------
 def _init_stocktake_state():
     if "stocktake" not in st.session_state:
-        # 🟦 تخزين نتائج كل موقع
-        if "stocktake_sites" not in st.session_state:
-            st.session_state.stocktake_sites = {}  # {الموقع: DataFrame}
-
         st.session_state.stocktake = {
             "scope": "all",
             "loc": "",
+            "prev_loc": "",
             "is_orig": True,
             "items": {},
             "manual_rev": 0,
             "scan_rev": 0,
             "last_code": "",
         }
+
+    if "stocktake_sites" not in st.session_state:
+        st.session_state.stocktake_sites = {}
+
+    if "run_add_to_basket" not in st.session_state:
+        st.session_state.run_add_to_basket = False
+
 
 
 def _scan_callback(scan_key: str):
@@ -1215,13 +1219,16 @@ def page_stocktake():
     # ================================
     def _auto_scan_handler():
         raw = st.session_state.get("autoscan_input", "").strip()
-        st.session_state.autoscan_input = ""
 
         if not raw:
             return
 
         st.session_state.stocktake["last_code"] = raw
         st.session_state.run_add_to_basket = True
+
+        # ❌ ممنوع تعديل widget key مباشرة
+        if "autoscan_input" in st.session_state:
+            del st.session_state["autoscan_input"]
 
     st.text_input(
         "🟦 المسح التلقائي (ماسح ضوئي بدون زر)",
@@ -1328,8 +1335,13 @@ def page_stocktake():
             )
 
             # تصفير المدخلات بعد الإضافة
+            # 🧹 تنظيف مفاتيح الإدخال القديمة (وقائي)
+            for k in list(st.session_state.keys()):
+                if k.startswith("stk_manual_code_") or k.startswith("stk_scanner_code_"):
+                    del st.session_state[k]
+
             st.session_state.stocktake["last_code"] = ""
-            st.session_state.autoscan_input = ""
+
 
     # ---------------------------------------------------------
     #  جدول القطع حسب الموقع قبل سلة الجرد
@@ -1379,11 +1391,12 @@ def page_stocktake():
             cur = st.session_state.stocktake["loc"].strip()
             df_current = pd.DataFrame([
                 {
-                    "الكود": final_code,
+                    "الكود": code,
                     "الموقع": cur,
                     "العدد الفعلي": d["count"],
                     "عدد النظام": d["sys_qty"],
                 }
+
                 for (code, loc), d in st.session_state.stocktake["items"].items()
                 if loc == cur
             ])
