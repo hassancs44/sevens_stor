@@ -422,6 +422,26 @@ CODE_IN_BRACKETS = re.compile(r"\[([^\[\]]+)\]")
 CODE_TOKEN = re.compile(r"[0-9A-Za-z\u0600-\u06FF\-_.\/]+")
 _AR_NUM_MAP = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
 
+# -------------------------------------------------
+# ✅ قاعدة جديدة: أي كود ينتهي بـ s أو S = غير أصلي
+# (يدعم: "-S", "- s", " -S ", وأي مسافات/فواصل قبل S)
+# -------------------------------------------------
+_SUFFIX_S_RE = re.compile(r"[-\s]*[sS]\s*$")      # يلتقط: -S / - s /  S / ... في آخر الكود
+_TRAIL_SEP_RE = re.compile(r"[-_\s]+$")           # لتنظيف أي داش/مسافات متبقية بعد الحذف
+
+def is_non_original_code(code: str) -> bool:
+    """غير أصلي إذا ينتهي بـ s أو S (مع أو بدون - ومسافات)."""
+    c = str(code or "").strip()
+    return bool(_SUFFIX_S_RE.search(c))
+
+def strip_trailing_s_suffix(code: str) -> str:
+    """يحذف s/S النهائية (مع - ومسافات) ويُنظف بقايا الداش/المسافات."""
+    c = str(code or "").strip()
+    c = _SUFFIX_S_RE.sub("", c).strip()
+    c = _TRAIL_SEP_RE.sub("", c).strip()
+    return c
+
+
 
 def _to_ascii_digits(s: str) -> str:
     return (s or "").translate(_AR_NUM_MAP)
@@ -468,21 +488,27 @@ def _extract_code_from_text(text: str) -> Optional[str]:
 
 # ✅ تم تعديل هذا المنطق بالكامل
 def is_original_code(code: str, cfg: dict) -> bool:
-    """الكود الأصلي هو الذي لا يحتوي على -S في النهاية."""
-    suf = _suffix_to_use(cfg)
-    return not str(code or "").strip().endswith(suf)
+    """✅ الأصلي = لا ينتهي بـ s أو S"""
+    return not is_non_original_code(code)
+
 
 
 def ensure_original_flag(code: str, cfg: dict, want_original: bool) -> str:
-    """إذا أردنا كودًا أصليًا، نزيل -S. إذا أردنا تقليدًا، نضيف -S."""
+    """
+    ✅ إذا أردنا أصلي: نحذف s/S النهائية (مع - ومسافات)
+    ✅ إذا أردنا غير أصلي: نضمن إضافة اللاحقة القياسية من الإعدادات (مثلاً -S)
+    """
     c = (code or "").strip()
-    suf = _suffix_to_use(cfg)
+    suf = _suffix_to_use(cfg)  # يبقى "-S" أو ما تحدده في الإعدادات
+
+    base = strip_trailing_s_suffix(c)
+
     if want_original:
-        # نزيل اللاحقة إن وُجدت
-        return c[:-len(suf)] if c.endswith(suf) else c
-    else:
-        # نضمن وجود اللاحقة
-        return c if c.endswith(suf) else (c + suf)
+        return base
+
+    # غير أصلي: نرجعها بالشكل القياسي (مثلاً: ABC-123-S)
+    return base + suf
+
 
 
 def apply_suffix_policy(raw_code: str, cfg: dict, context: str, checkbox_value: Optional[bool],
@@ -493,7 +519,8 @@ def apply_suffix_policy(raw_code: str, cfg: dict, context: str, checkbox_value: 
     مع كشف التناقضات وتنبيه المستخدمين
     """
 
-    base = _normalize_code_text(_extract_code_from_text(raw_code) or raw_code, cfg, context=context)
+    base0 = _normalize_code_text(_extract_code_from_text(raw_code) or raw_code, cfg, context=context)
+    base = strip_trailing_s_suffix(base0)  # ✅ نحذف أي s/S نهائية قبل بناء النسخ
     suf = _suffix_to_use(cfg)
     orig_code = base
     comm_code = base + suf
@@ -804,10 +831,11 @@ def _apply_excel_coloring(path: str):
             code_val = str(cell_code.value or "").strip()
             if code_val:
                 # ✅ الآن: الأصلي (بدون -S) = أخضر، التقليد (مع -S) = برتقالي
-                if not code_val.endswith(suf):
-                    cell_code.fill = fill_green
+                if is_non_original_code(code_val):
+                    cell_code.fill = fill_orange  # غير أصلي
                 else:
-                    cell_code.fill = fill_orange
+                    cell_code.fill = fill_green  # أصلي
+
             try:
                 q = int(float(cell_qty.value or 0))
             except Exception:
