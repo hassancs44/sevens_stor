@@ -1071,8 +1071,10 @@ def page_find_and_scan():
 
         def _on_scan():
             raw = st.session_state.get("scanner_code_input", "")
-            st.session_state.scanner_code_input = ""
             st.session_state.last_search_code = raw
+
+            # 🔥 تفريغ خانة المسح بعد القراءة
+            st.session_state["scanner_code_input"] = ""
 
         st.text_input("الكود (ماسح ضوئي)", key="scanner_code_input", on_change=_on_scan)
     with col_c:
@@ -1121,10 +1123,15 @@ def _init_stocktake_state():
 
 
 def _scan_callback(scan_key: str):
-    raw = st.session_state.get(scan_key, "")
+    raw = st.session_state.get(scan_key, "").strip()
     st.session_state.stocktake["last_code"] = _normalize_code_text(raw, load_config(), context="stocktake")
     st.session_state.stocktake["scan_rev"] += 1
+
+    # 🔥 تفريغ حقل الماسح مباشرة
+    st.session_state[scan_key] = ""
+
     st.rerun()
+
 
 
 def _clear_inputs_and_rerun():
