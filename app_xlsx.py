@@ -1255,20 +1255,24 @@ def page_stocktake():
     def _auto_scan_handler():
         raw = st.session_state.get("autoscan_input", "").strip()
 
+        # لا شيء إذا كان فاضي
         if not raw:
             return
 
+        # ① حفظ الكود المقروء
         st.session_state.stocktake["last_code"] = raw
+
+        # ② تفعيل الإضافة التلقائية (نفس زر الإضافة)
         st.session_state.run_add_to_basket = True
 
-        # ❌ ممنوع تعديل widget key مباشرة
-        if "autoscan_input" in st.session_state:
-            del st.session_state["autoscan_input"]
+        # ③ تفريغ خانة الماسح بعد اكتمال القراءة
+        # (تفريغ آمن واحترافي)
+        del st.session_state["autoscan_input"]
 
     st.text_input(
-        "🟦 المسح التلقائي (ماسح ضوئي بدون زر)",
+        "🟦 المسح التلقائي (ماسح ضوئي تلقائي)",
         key="autoscan_input",
-        placeholder="امسح الباركود وسيضاف تلقائيًا...",
+        placeholder="امسح الباركود وسيتم التحقق والإضافة تلقائيًا...",
         on_change=_auto_scan_handler,
     )
 
