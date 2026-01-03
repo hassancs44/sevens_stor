@@ -1104,23 +1104,25 @@ def page_find_and_scan():
 def _init_stocktake_state():
     if "stocktake" not in st.session_state:
         st.session_state.stocktake = {
-            "scope": "all",
+            "scope": "loc",          # الافتراضي: حسب موقع (الأصح للجرد)
             "loc": "",
-            "prev_loc": "",
             "is_orig": True,
-            "items": {},
-            "manual_rev": 0,
-            "scan_rev": 0,
-            "last_code": "",
+            "items": {},             # key: (code, loc) => {"count":int, "sys_qty":int}
+            "last_scan": "",         # آخر قيمة باركود (منع تكرار سريع)
+            "last_scan_ts": 0.0,     # توقيت آخر مسح
         }
 
     if "stocktake_sites" not in st.session_state:
-        st.session_state.stocktake_sites = {}
+        st.session_state.stocktake_sites = {}  # site -> DataFrame
 
-    if "run_add_to_basket" not in st.session_state:
-        st.session_state.run_add_to_basket = False
-
-
+    # مفاتيح الإدخال الثابتة (بدون rev) = أقل مشاكل
+    if "stk_inputs" not in st.session_state:
+        st.session_state.stk_inputs = {
+            "code_manual": "",
+            "code_scan": "",
+            "code_auto": "",
+            "qty": 1,
+        }
 
 def _scan_callback(scan_key: str):
     raw = st.session_state.get(scan_key, "").strip()
@@ -1142,431 +1144,390 @@ def _clear_inputs_and_rerun():
 
 
 def page_stocktake():
-    st.subheader("الجرد المبسّط")
+    st.subheader("الجرد الذكي (بدون تداخل)")
 
     file_status_badge()
     _init_stocktake_state()
+
     cfg = load_config()
     stock, minlvl, tx, _ = read_all()
     min_level = int(cfg.get("global_min_level", 2))
 
-    # إعداد النطاق والموقع
-    c1, c2 = st.columns([2, 2])
+    # =========================
+    # Helpers داخل الصفحة
+    # =========================
+    def _normalize_final_code(raw_code: str, is_orig: bool) -> str:
+        """
+        يطبع الكود + يطبق سياسة الأصلي/التجاري بشكل موحد (بدون قص يدوي).
+        """
+        if not raw_code:
+            return ""
+        # apply_suffix_policy عندك قوي ومربوط بالمخزون
+        final_code = apply_suffix_policy(raw_code, cfg, context="stocktake", checkbox_value=is_orig,
+                                         location=st.session_state.stocktake.get("loc") or None)
+        final_code = _normalize_code_text(final_code, cfg, context="stocktake")
+        return final_code.strip()
+
+    def _resolve_location_for_code(final_code: str) -> Tuple[Optional[str], List[str]]:
+        """
+        في وضع (المخزن كامل): لازم نحدد موقع صحيح حتى لا تتداخل كميات نفس الكود بين مواقع.
+        - إذا الكود موجود بموقع واحد: نختاره تلقائيًا.
+        - إذا موجود بعدة مواقع: نطلب تحديد موقع.
+        """
+        if not final_code:
+            return None, []
+
+        matched = stock[stock["الكود"].astype(str).str.strip() == final_code].copy()
+        if matched.empty:
+            return None, []
+
+        locs = sorted(matched["الموقع"].astype(str).str.strip().unique().tolist())
+        if len(locs) == 1:
+            return locs[0], locs
+
+        return None, locs  # متعدد المواقع
+
+    def _sys_qty_for(code: str, loc: Optional[str]) -> int:
+        if not code:
+            return 0
+        matched = stock[stock["الكود"].astype(str).str.strip() == code].copy()
+        if matched.empty:
+            return 0
+        if loc:
+            return int(matched[matched["الموقع"].astype(str).str.strip() == str(loc).strip()]["المخزون"].sum())
+        return int(matched["المخزون"].sum())
+
+    def _debounced(raw: str) -> bool:
+        """
+        يمنع تكرار نفس المسحة خلال 0.4 ثانية (ماسحات كثير ترسل Enter مرتين).
+        """
+        raw = (raw or "").strip()
+        if not raw:
+            return True
+
+        now_t = time.time()
+        last = st.session_state.stocktake.get("last_scan", "")
+        last_ts = float(st.session_state.stocktake.get("last_scan_ts", 0.0))
+
+        if raw == last and (now_t - last_ts) < 0.4:
+            return False
+
+        st.session_state.stocktake["last_scan"] = raw
+        st.session_state.stocktake["last_scan_ts"] = now_t
+        return True
+
+    def _clear_inputs():
+        st.session_state.stk_inputs["code_manual"] = ""
+        st.session_state.stk_inputs["code_scan"] = ""
+        st.session_state.stk_inputs["code_auto"] = ""
+        st.session_state.stk_inputs["qty"] = 1
+
+    def _add_to_basket(raw_code: str, is_orig: bool, qty_in: int, scope: str, loc_entered: str) -> bool:
+        """
+        الإضافة الآمنة: مفتاح السلة دائمًا (code, location) لمنع التداخل.
+        """
+        raw_code = (raw_code or "").strip()
+        if not raw_code:
+            st.toast("⚠️ امسح/اكتب الكود أولاً.", icon="⚠️", duration=4)
+            return False
+
+        if not _debounced(raw_code):
+            return False
+
+        final_code = _normalize_final_code(raw_code, is_orig)
+        if not final_code:
+            st.toast("⚠️ الكود غير صالح بعد التطبيع.", icon="⚠️", duration=4)
+            return False
+
+        # تحديد الموقع
+        chosen_loc: Optional[str] = None
+        locs_for_code: List[str] = []
+
+        if scope == "loc":
+            chosen_loc = (loc_entered or "").strip()
+            if not chosen_loc:
+                st.toast("❌ أدخل الموقع أولاً.", icon="❌", duration=4)
+                return False
+
+            # تحذير إذا الموقع غير موجود للنظام (لكن نسمح)
+            _, locs_for_code = _resolve_location_for_code(final_code)
+            if locs_for_code and chosen_loc not in locs_for_code:
+                st.toast(
+                    f"⚠️ الموقع '{chosen_loc}' غير مسجل لهذا الكود (المسجل: {', '.join(locs_for_code)}). سيتم إضافته للجرد كموقع جديد.",
+                    icon="⚠️",
+                    duration=8
+                )
+
+        else:
+            # المخزن كامل: لازم نحدد موقع
+            auto_loc, locs_for_code = _resolve_location_for_code(final_code)
+
+            if auto_loc:
+                chosen_loc = auto_loc
+            else:
+                # متعدد مواقع أو غير موجود: نجبر تحديد موقع
+                if locs_for_code:
+                    st.error("⚠️ هذا الكود موجود في أكثر من موقع. اختر الموقع الصحيح قبل الإضافة لمنع التداخل:")
+                    chosen_loc = st.selectbox("اختر موقع الكود", options=locs_for_code, key="stk_pick_loc_multi")
+                    st.info("الآن اضغط زر (إضافة إلى سلة الجرد) مرة أخرى بعد اختيار الموقع.")
+                else:
+                    st.error("⚠️ الكود غير موجود بالنظام ولا يمكن تحديد موقعه تلقائيًا. أدخل موقعًا واستخدم وضع (حسب موقع محدد).")
+                return False
+
+        # كمية الإدخال
+        qty_in = int(qty_in or 0)
+        if qty_in <= 0:
+            qty_in = 1
+
+        # sys qty حسب الموقع المختار
+        sys_qty = _sys_qty_for(final_code, chosen_loc)
+
+        # ✅ مفتاح السلة دائمًا: (code, loc)
+        key = (final_code, chosen_loc)
+        items = st.session_state.stocktake["items"]
+
+        if key in items:
+            items[key]["count"] += qty_in
+        else:
+            items[key] = {"count": qty_in, "sys_qty": int(sys_qty)}
+
+        st.toast(
+            f"✅ تمت الإضافة: {final_code} | الموقع: {chosen_loc} | +{qty_in} | (جرد الآن: {items[key]['count']})",
+            icon="✅",
+            duration=6
+        )
+        return True
+
+    # =========================
+    # واجهة الإعدادات
+    # =========================
+    c1, c2, c3 = st.columns([2, 2, 1])
+
     with c1:
-        scope = st.radio("نطاق الجرد", ["المخزن كامل", "حسب موقع محدد"], horizontal=True,
-                         index=0 if st.session_state.stocktake["scope"] == "all" else 1)
-        st.session_state.stocktake["scope"] = "all" if scope == "المخزن كامل" else "loc"
+        scope_ui = st.radio("نطاق الجرد", ["حسب موقع محدد", "المخزن كامل"], horizontal=True,
+                            index=0 if st.session_state.stocktake["scope"] == "loc" else 1)
+        st.session_state.stocktake["scope"] = "loc" if scope_ui == "حسب موقع محدد" else "all"
+
     with c2:
         if st.session_state.stocktake["scope"] == "loc":
             loc_input = st.text_input("الموقع (كتابي)", value=st.session_state.stocktake.get("loc", ""),
-                                      placeholder="مثال: رف-أ1", key="stk_loc_input")
-            st.session_state.stocktake["loc"] = loc_input.strip()
+                                      placeholder="مثال: رف-أ1", key="stk_loc_input_new")
+            st.session_state.stocktake["loc"] = (loc_input or "").strip()
 
-            # 🔄 زر إعادة جرد هذا الموقع
             cur_loc = st.session_state.stocktake["loc"].strip()
             if cur_loc:
                 if st.button(f"🔄 إعادة جرد الموقع: {cur_loc}"):
-                    # احذف بيانات الموقع من المواقع المكتملة
                     if cur_loc in st.session_state.stocktake_sites:
                         del st.session_state.stocktake_sites[cur_loc]
-
-                    # احذف القطع الخاصة بهذا الموقع من السلة
+                    # احذف عناصر السلة الخاصة بهذا الموقع
                     st.session_state.stocktake["items"] = {
                         k: v for k, v in st.session_state.stocktake["items"].items()
-                        if k[1] != cur_loc
+                        if str(k[1]).strip() != cur_loc
                     }
-
-                    st.toast(f"♻️ تم مسح بيانات الجرد للموقع '{cur_loc}'. يمكنك البدء من جديد.", icon="♻️", duration=6)
+                    st.toast(f"♻️ تم مسح جرد الموقع '{cur_loc}'.", icon="♻️", duration=6)
+                    _clear_inputs()
                     st.rerun()
-
-            # 🟦 منطق الانتقال بين المواقع
-            prev_loc = st.session_state.stocktake.get("prev_loc", "")
-            current_loc = st.session_state.stocktake["loc"].strip()
-
-            # إذا كان هناك موقع سابق وتم تغيير الموقع
-            if prev_loc and current_loc and current_loc != prev_loc:
-                # هل يوجد قطع لم تُجرّد؟
-                remaining = [
-                    k for k in st.session_state.stocktake["items"].keys()
-                    if k[1] == prev_loc
-                ]
-
-                if remaining:
-                    st.toast(
-                        f"⚠️ يوجد قطع لم تُجرّد في الموقع '{prev_loc}'.",
-                        icon="⚠️",
-                        duration=15
-                    )
-                    # إعادة الموقع القديم
-                    st.session_state.stocktake["loc"] = prev_loc
-                    st.rerun()
-                else:
-                    # الموقع مكتمل → نحفظه
-                    df_site = pd.DataFrame([
-                        {
-                            "الكود": code,
-                            "الموقع": prev_loc,
-                            "العدد الفعلي": d["count"],
-                            "عدد النظام": d["sys_qty"],
-                        }
-                        for (code, loc), d in st.session_state.stocktake["items"].items()
-                        if loc == prev_loc
-                    ])
-                    if not df_site.empty:
-                        st.session_state.stocktake_sites[prev_loc] = df_site.copy()
-
-                    # إزالة عناصر الموقع السابق من السلة
-                    st.session_state.stocktake["items"] = {
-                        k: v for k, v in st.session_state.stocktake["items"].items()
-                        if k[1] != prev_loc
-                    }
-
-                    st.toast(
-                        f"✅ تم حفظ جرد الموقع '{prev_loc}'. يمكنك البدء في '{current_loc}'.",
-                        icon="✅",
-                        duration=8
-                    )
-
-            # تحديث الموقع السابق دائماً
-            st.session_state.stocktake["prev_loc"] = current_loc
-
         else:
-            st.text_input("الموقع (معطّل في وضع المخزن كامل)", value="", disabled=True)
+            st.text_input("الموقع (غير مطلوب هنا)", value="", disabled=True)
 
-    # مدخلات الكود والعدد
-    c3, c4, c5 = st.columns([1, 3, 3])
     with c3:
-        is_orig = st.checkbox("أصلي؟", value=st.session_state.stocktake.get("is_orig", True), key="stocktake_orig")
+        is_orig = st.checkbox("أصلي؟", value=st.session_state.stocktake.get("is_orig", True), key="stk_is_orig_new")
         st.session_state.stocktake["is_orig"] = is_orig
-    with c4:
-        manual_key = f"stk_manual_code_{st.session_state.stocktake['manual_rev']}"
-        manual_code = st.text_input("الكود (كتابي)", key=manual_key, placeholder="اكتب الكود أو امسح الباركود")
-    with c5:
-        scan_key = f"stk_scanner_code_{st.session_state.stocktake['scan_rev']}"
-        st.text_input("الكود (ماسح ضوئي)", key=scan_key,
-                      on_change=_scan_callback, args=(scan_key,),
-                      placeholder="امسح الباركود هنا ثم Enter")
 
-    qty = st.number_input("العدد الفعلي", min_value=0, value=0, step=1, key="stk_count_simple")
-
-    # ================================
-    #  🟦 وضع المسح التلقائي Auto Scan
-    # ================================
-    def _auto_scan_handler():
-        raw = st.session_state.get("autoscan_input", "").strip()
-
-        # لا شيء إذا كان فاضي
-        if not raw:
-            return
-
-        # ① حفظ الكود المقروء
-        st.session_state.stocktake["last_code"] = raw
-
-        # ② تفعيل الإضافة التلقائية (نفس زر الإضافة)
-        st.session_state.run_add_to_basket = True
-
-        # ③ تفريغ خانة الماسح بعد اكتمال القراءة
-        # (تفريغ آمن واحترافي)
-        del st.session_state["autoscan_input"]
-
-    st.text_input(
-        "🟦 المسح التلقائي (ماسح ضوئي تلقائي)",
-        key="autoscan_input",
-        placeholder="امسح الباركود وسيتم التحقق والإضافة تلقائيًا...",
-        on_change=_auto_scan_handler,
-    )
-
-    # زر الإضافة
-    pressed = st.button("إضافة إلى سلة الجرد")
-
-    if st.session_state.get("run_add_to_basket"):
-        pressed = True
-        st.session_state.run_add_to_basket = False
-
-    if pressed:
-
-        raw = st.session_state.stocktake["last_code"]
-
-        # لو ما فيه كود من ماسح تلقائي، خذ من المدخل اليدوي
-        if not raw:
-            raw = manual_code.strip()
-
-        if not raw:
-            st.toast("⚠️ الرجاء إدخال أو مسح الكود أولاً.", icon="⚠️", duration=4)
-        else:
-            # ✔ تطبيع الكود حسب الإعدادات
-            code_norm = _normalize_code_text(raw, cfg, context="stocktake")
-            suf = _suffix_to_use(cfg)
-
-            # --- 🔍 منطق تمييز الأصلي / التجاري ---
-            if st.session_state.stocktake["is_orig"]:
-                # المستخدم اختار أصلي → الكود بدون اللاحقة
-                final_code = code_norm if not code_norm.endswith(suf) else code_norm[:-len(suf)]
-            else:
-                # المستخدم اختار تجاري → الكود مع اللاحقة
-                final_code = code_norm if code_norm.endswith(suf) else code_norm + suf
-
-            # البحث الدقيق داخل ملف الإكسل على الكود النهائي
-            matched = stock[stock["الكود"] == final_code]
-
-            # المواقع المسجّلة لهذا الكود
-            sys_locs = sorted(matched["الموقع"].astype(str).unique().tolist()) if not matched.empty else []
-
-            # الموقع الحالي (إن كان الجرد حسب موقع)
-            loc_entered = st.session_state.stocktake["loc"].strip() if st.session_state.stocktake[
-                                                                           "scope"] == "loc" else None
-
-            # ✅ تحقق من إدخال الموقع في وضع "حسب موقع محدد"
-            if st.session_state.stocktake["scope"] == "loc":
-                if not loc_entered:
-                    st.toast("❌ أدخل الموقع أولًا.", icon="❌", duration=4)
-                    return
-
-                # لو الكود موجود في النظام لكن الموقع مختلف
-                if sys_locs and loc_entered not in sys_locs:
-                    st.toast(
-                        f"⚠️ الموقع '{loc_entered}' غير مسجل لهذا الكود في الملف (المواقع المسجلة: {', '.join(sys_locs)}).",
-                        icon="⚠️",
-                        duration=8,
-                    )
-                    # نسمح بالاستمرار أحيانًا، لكن نبهناه
-                # نمرر
-
-            # ✅ حساب كمية النظام
-            sys_qty = 0
-            if not matched.empty:
-                if loc_entered:
-                    sys_qty = int(matched[matched["الموقع"].astype(str).str.strip() == loc_entered]["المخزون"].sum())
-                else:
-                    sys_qty = int(matched["المخزون"].sum())
-
-            # ✅ كمية الإدخال
-            add_qty_value = int(qty)
-            if add_qty_value <= 0:
-                add_qty_value = 1
-
-            items = st.session_state.stocktake["items"]
-            key = (final_code, loc_entered if st.session_state.stocktake["scope"] == "loc" else None)
-
-            if key in items:
-                items[key]["count"] += add_qty_value
-                total_for_key = items[key]["count"]
-            else:
-                items[key] = {"count": add_qty_value, "sys_qty": int(sys_qty)}
-                total_for_key = add_qty_value
-
-            loc_label = "المخزن كامل" if key[1] is None else key[1]
-
-            # رقم الصف = عدد العناصر في السلة الآن
-            row_num = len(st.session_state.stocktake["items"])
-
-            # تنبيه كامل لمدة 10 ثواني ويشمل رقم الصف
-            st.toast(
-                f"🔄 تم تعديل الصف رقم {row_num} — الكود: {final_code}, الموقع: {loc_label}, العدد الجديد في الجرد: {total_for_key}",
-                icon="🔔",
-                duration=10
-            )
-
-            # إعادة تركيز المؤشر على خانة الماسح
-            st.markdown(
-                "<script>setTimeout(()=>document.querySelectorAll('input[placeholder=\"امسح الباركود وسيضاف تلقائيًا...\"]')[0]?.focus(),300);</script>",
-                unsafe_allow_html=True,
-            )
-
-            # تصفير المدخلات بعد الإضافة
-            # 🧹 تنظيف مفاتيح الإدخال القديمة (وقائي)
-            for k in list(st.session_state.keys()):
-                if k.startswith("stk_manual_code_") or k.startswith("stk_scanner_code_"):
-                    del st.session_state[k]
-
-            st.session_state.stocktake["last_code"] = ""
-
-
-    # ---------------------------------------------------------
-    #  جدول القطع حسب الموقع قبل سلة الجرد
-    # ---------------------------------------------------------
-    st.markdown("### القطع الموجودة في الموقع المحدد")
-
-    if st.session_state.stocktake["scope"] == "loc":
-        loc_entered = st.session_state.stocktake["loc"].strip()
-        if loc_entered:
-            df_loc = stock[stock["الموقع"].astype(str).str.strip() == loc_entered].copy()
-        else:
-            df_loc = stock.copy()
-    else:
-        df_loc = stock.copy()
-
-    # إزالة أي قطعة موجودة مسبقاً في سلة الجرد (انتقال إلى السلة)
-    items_keys = st.session_state.stocktake["items"].keys()
-    codes_in_basket = set(k[0] for k in items_keys)
-    locs_in_basket = [k[1] for k in items_keys]
-
-    # إذا سلة الجرد بنطاق موقع معين → استبعاد القطع المنقولة فقط
-    if st.session_state.stocktake["scope"] == "loc":
-        df_loc = df_loc[~df_loc["الكود"].astype(str).isin(codes_in_basket)]
-
-    else:
-        # المخزن كامل → لا نعرض أي قطعة موجودة في السلة (أي موقع)
-        df_loc = df_loc[~df_loc["الكود"].astype(str).isin(codes_in_basket)]
-
-    st.dataframe(
-        df_loc.sort_values(["الكود", "الموقع"]),
-        use_container_width=True,
-        height=300
-    )
-
-    # ---------------------------------------------------------
-    # زر تصدير ملف الجرد (بدون تطبيق التسوية)
-    # ---------------------------------------------------------
-    if st.button("📤 تصدير ملف الجرد"):
-        final_export = {}
-
-        # 1) المواقع التي تم حفظها مسبقًا
-        for site, df_site in st.session_state.stocktake_sites.items():
-            final_export[site] = df_site.copy()
-
-        # 2) الموقع الحالي (إن كان فيه جرد)
-        if st.session_state.stocktake["scope"] == "loc":
-            cur = st.session_state.stocktake["loc"].strip()
-            df_current = pd.DataFrame([
-                {
-                    "الكود": code,
-                    "الموقع": cur,
-                    "العدد الفعلي": d["count"],
-                    "عدد النظام": d["sys_qty"],
-                }
-
-                for (code, loc), d in st.session_state.stocktake["items"].items()
-                if loc == cur
-            ])
-            if not df_current.empty:
-                final_export[cur] = df_current.copy()
-
-        # ---------------------------------------------------------
-        # 3) القطع الغير مجرودة (لم يتم جردها في أي موقع)
-        # ---------------------------------------------------------
-        stock_all, _, _, _ = read_all()
-        counted_codes = set([code for (code, _) in st.session_state.stocktake["items"].keys()])
-
-        df_unscanned = stock_all[~stock_all["الكود"].astype(str).isin(counted_codes)].copy()
-
-        df_unscanned["الموقع"] = df_unscanned["الموقع"].astype(str)
-
-        # ---------------------------------------------------------
-        # 4) إنشاء ملف Excel النهائي
-        # ---------------------------------------------------------
-        out = io.BytesIO()
-        with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
-
-            # الورقة الأولى: القطع الغير مجرودة
-            df_unscanned.to_excel(writer, index=False, sheet_name="غير_مجرود")
-
-            # بقية المواقع
-            for site, df_site in final_export.items():
-                sheet_name = site[:31] if site else "بدون_موقع"
-                df_site.to_excel(writer, index=False, sheet_name=sheet_name)
-
-        st.download_button(
-            "📥 تحميل ملف الجرد النهائي",
-            data=out.getvalue(),
-            file_name=f"تقرير_الجرد_{_ts()}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    # =========================
+    # مدخلات المسح (ثابتة + تفريغ تلقائي)
+    # =========================
+    colA, colB, colC = st.columns([3, 3, 1])
+    with colA:
+        st.session_state.stk_inputs["code_manual"] = st.text_input(
+            "الكود (كتابي)",
+            value=st.session_state.stk_inputs.get("code_manual", ""),
+            key="stk_code_manual_fixed",
+            placeholder="اكتب الكود (اختياري)"
         )
 
-    # عرض السلة
+    with colB:
+        def _on_scan_enter():
+            raw = st.session_state.get("stk_code_scan_fixed", "").strip()
+            if raw:
+                ok = _add_to_basket(
+                    raw_code=raw,
+                    is_orig=st.session_state.stocktake["is_orig"],
+                    qty_in=st.session_state.stk_inputs.get("qty", 1),
+                    scope=st.session_state.stocktake["scope"],
+                    loc_entered=st.session_state.stocktake.get("loc", "")
+                )
+                # تفريغ آمن دائمًا
+                st.session_state["stk_code_scan_fixed"] = ""
+                if ok:
+                    st.session_state.stk_inputs["code_manual"] = ""
+                    st.session_state.stk_inputs["qty"] = 1
+                    st.rerun()
+
+        st.text_input(
+            "الكود (ماسح ضوئي)",
+            key="stk_code_scan_fixed",
+            placeholder="امسح الباركود هنا ثم Enter",
+            on_change=_on_scan_enter
+        )
+
+    with colC:
+        st.session_state.stk_inputs["qty"] = st.number_input(
+            "العدد",
+            min_value=1,
+            value=int(st.session_state.stk_inputs.get("qty", 1) or 1),
+            step=1,
+            key="stk_qty_fixed"
+        )
+
+    # زر إضافة يدوي (لو المستخدم كتب بالكود الكتابي)
+    if st.button("إضافة إلى سلة الجرد", type="primary"):
+        raw = (st.session_state.stk_inputs.get("code_manual") or "").strip()
+        ok = _add_to_basket(
+            raw_code=raw,
+            is_orig=st.session_state.stocktake["is_orig"],
+            qty_in=st.session_state.stk_inputs.get("qty", 1),
+            scope=st.session_state.stocktake["scope"],
+            loc_entered=st.session_state.stocktake.get("loc", "")
+        )
+        if ok:
+            _clear_inputs()
+            st.rerun()
+
+    st.markdown("---")
+
+    # =========================
+    # عرض القطع في الموقع (بدون حذف عشوائي)
+    # =========================
+    st.markdown("### القطع الموجودة (حسب النطاق)")
+
+    if st.session_state.stocktake["scope"] == "loc":
+        loc_entered = (st.session_state.stocktake.get("loc") or "").strip()
+        if loc_entered:
+            df_view = stock[stock["الموقع"].astype(str).str.strip() == loc_entered].copy()
+        else:
+            df_view = pd.DataFrame(columns=stock.columns)
+    else:
+        df_view = stock.copy()
+
+    # لا نحذف من العرض بناءً على الكود فقط (هذا كان يسبب لخبطة)
+    st.dataframe(df_view.sort_values(["الكود", "الموقع"]), use_container_width=True, height=320)
+
+    # =========================
+    # بناء سلة الجرد
+    # =========================
     st.markdown("### سلة الجرد")
+
     rows = []
     for (code, loc), d in st.session_state.stocktake["items"].items():
         rows.append({
             "الكود": code,
             "النوع": "أصلي" if is_original_code(code, cfg) else "تجاري",
-            "الموقع": "المخزن كامل" if loc is None else loc,
-            "العدد الفعلي": d["count"],
-            "عدد النظام": d["sys_qty"],
+            "الموقع": str(loc).strip(),
+            "عدد النظام": int(d.get("sys_qty", 0)),
+            "العدد الفعلي": int(d.get("count", 0)),
+            "الفرق": int(d.get("count", 0)) - int(d.get("sys_qty", 0)),
         })
-    basket_df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["الكود", "النوع", "الموقع", "العدد الفعلي", "عدد النظام"])
-    table_height = min(800, 80 + len(basket_df) * 35)
 
-    st.dataframe(
-        basket_df.sort_values(["الكود", "الموقع"]),
-        use_container_width=True,
-        height=table_height
+    basket_df = pd.DataFrame(rows) if rows else pd.DataFrame(
+        columns=["الكود", "النوع", "الموقع", "عدد النظام", "العدد الفعلي", "الفرق"]
     )
 
-    total_count = basket_df["العدد الفعلي"].sum() if not basket_df.empty else 0
-    st.markdown(f"**إجمالي القطع في الجرد:** {total_count:,}")
+    st.dataframe(
+        basket_df.sort_values(["الموقع", "الكود"]),
+        use_container_width=True,
+        height=min(800, 120 + len(basket_df) * 35)
+    )
 
-    col_clear, col_apply = st.columns(2)
-    with col_clear:
-        if st.button("تفريغ السلة"):
+    st.caption(f"عدد السطور في السلة: {len(basket_df):,} | إجمالي العدّ الفعلي: {basket_df['العدد الفعلي'].sum() if not basket_df.empty else 0:,}")
+
+    colX, colY, colZ = st.columns([1, 1, 2])
+
+    with colX:
+        if st.button("🗑️ تفريغ السلة"):
             st.session_state.stocktake["items"].clear()
-            st.toast("🗑️ تم تفريغ السلة.", icon="🗑️", duration=4)
+            st.toast("تم تفريغ السلة.", icon="🗑️", duration=4)
+            _clear_inputs()
+            st.rerun()
 
-    with col_apply:
-        if st.button("تطبيق التسوية"):
-            if not st.session_state.stocktake["items"]:
-                st.toast("⚠️ السلة فارغة.", icon="⚠️", duration=4)
-                return
-            # 🟦 تجميع جميع المواقع في ملف Excel نهائي
-            final_export = {}
-
-            # المواقع التي تم حفظها مسبقاً
-            for site, df_site in st.session_state.stocktake_sites.items():
-                final_export[site] = df_site.copy()
-
-            # إضافة الموقع الحالي إن كان مكتملاً
-            if st.session_state.stocktake["scope"] == "loc":
-                cur = st.session_state.stocktake["loc"].strip()
-                df_current = pd.DataFrame([
-                    {
-                        "الكود": code,
-                        "الموقع": cur,
-                        "العدد الفعلي": d["count"],
-                        "عدد النظام": d["sys_qty"],
-                    }
-                    for (code, loc), d in st.session_state.stocktake["items"].items()
-                    if loc == cur
-                ])
-                if not df_current.empty:
-                    final_export[cur] = df_current.copy()
-
-            # زر تحميل الملف النهائي
+    with colY:
+        if st.button("📤 تصدير ملف الجرد"):
+            # تقرير واحد: السلة + غير مجرود
             out = io.BytesIO()
+
+            # غير مجرود = العناصر غير الموجودة في السلة (حسب (code,loc))
+            basket_keys = set((str(k[0]).strip(), str(k[1]).strip()) for k in st.session_state.stocktake["items"].keys())
+            stock2 = stock.copy()
+            stock2["_k1"] = stock2["الكود"].astype(str).str.strip()
+            stock2["_k2"] = stock2["الموقع"].astype(str).str.strip()
+            df_unscanned = stock2[~stock2.apply(lambda r: (r["_k1"], r["_k2"]) in basket_keys, axis=1)].copy()
+            df_unscanned = df_unscanned.drop(columns=["_k1", "_k2"], errors="ignore")
+
             with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
-                for site, df_site in final_export.items():
-                    writer_sheet = site[:31]  # اسم الورقة بحد أقصى 31 حرف
-                    df_site.to_excel(writer, index=False, sheet_name=writer_sheet)
+                basket_df.to_excel(writer, index=False, sheet_name="الجرد")
+                df_unscanned.to_excel(writer, index=False, sheet_name="غير_مجرود")
 
             st.download_button(
-                "📥 تحميل ملف الجرد (ورقة لكل موقع)",
+                "📥 تحميل تقرير الجرد",
                 data=out.getvalue(),
-                file_name=f"جرد_المواقع_{_ts()}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                file_name=f"تقرير_الجرد_{_ts()}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
-            try:
-                stock_cur, minlvl_cur, tx_cur, _ = read_all()
-                DEFAULT_LOC = "MAIN"
-                adj = 0
-                for (code, loc), data in st.session_state.stocktake["items"].items():
-                    actual, sys_qty = data["count"], data["sys_qty"]
-                    delta = actual - sys_qty
-                    if delta == 0:
-                        continue
-                    target_loc = loc or DEFAULT_LOC
-                    stock_cur, _ = add_qty(stock_cur, code, target_loc, delta)
-                    tx_cur = append_txn(
-                        tx_cur, "ADJUST", code, get_part_desc(stock_cur, code),
-                        abs(delta),
-                        target_loc if delta < 0 else None,
-                        target_loc if delta > 0 else None,
-                        "STOCKTAKE", "تسوية جرد")
-                    adj += 1
-                write_all_with_retry(stock_cur, minlvl_cur, tx_cur)
-                st.cache_data.clear()
-                st.toast(f"✅ تمت التسوية لعدد {adj} قطع.", icon="✅", duration=4)
-            except Exception as e:
-                st.toast(f"❌ فشل التسوية: {e}", icon="❌", duration=4)
+    with colZ:
+        st.info("✅ ملاحظة مهمة: في وضع (المخزن كامل) يتم منع دمج نفس الكود بين مواقع مختلفة. إذا كان الكود في عدة مواقع سيطلب منك اختيار الموقع.")
+
+    st.markdown("---")
+
+    # =========================
+    # تطبيق التسوية (بدون خلط)
+    # =========================
+    if st.button("✅ تطبيق التسوية على ملف المخزون", type="primary"):
+        if not st.session_state.stocktake["items"]:
+            st.toast("⚠️ السلة فارغة.", icon="⚠️", duration=4)
+            return
+
+        try:
+            stock_cur, minlvl_cur, tx_cur, _ = read_all()
+            adj = 0
+
+            for (code, loc), data in st.session_state.stocktake["items"].items():
+                code = str(code).strip()
+                loc = str(loc).strip()
+                actual = int(data.get("count", 0))
+                sys_qty = int(data.get("sys_qty", 0))
+                delta = actual - sys_qty
+                if delta == 0:
+                    continue
+
+                stock_cur, _ = add_qty(stock_cur, code, loc, delta)
+
+                tx_cur = append_txn(
+                    tx_cur,
+                    "ADJUST",
+                    code,
+                    get_part_desc(stock_cur, code),
+                    abs(delta),
+                    loc if delta < 0 else None,
+                    loc if delta > 0 else None,
+                    "STOCKTAKE",
+                    f"تسوية جرد (loc={loc})"
+                )
+                adj += 1
+
+            write_all_with_retry(stock_cur, minlvl_cur, tx_cur)
+            st.cache_data.clear()
+
+            st.toast(f"✅ تمت التسوية لعدد {adj} سطر.", icon="✅", duration=6)
+
+            # بعد التسوية: صفّر السلة والمدخلات
+            st.session_state.stocktake["items"].clear()
+            _clear_inputs()
+            st.rerun()
+
+        except Exception as e:
+            st.toast(f"❌ فشل التسوية: {e}", icon="❌", duration=6)
+
 
 # -------------------------------------------------
 # باقي الصفحات (بدون تغيير جوهري لأنها تعمل جيدًا)
